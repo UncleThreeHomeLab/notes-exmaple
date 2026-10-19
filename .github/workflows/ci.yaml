@@ -2,12 +2,16 @@ name: CI
 "on":
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   workflow_dispatch:
-permissions: {contents: read}
+permissions: {contents: read, pull-requests: read}
 jobs:
   test:
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@118e5ce04f195d77eec297c6eedc68de20649f1f
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@ee5085e793a42803305d6f5a4f5a34873453363a
     with:
       application: notes

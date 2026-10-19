@@ -1,0 +1,6 @@
+.git
+.github
+.cloudlab
+.env
+*.tar
+__pycache__

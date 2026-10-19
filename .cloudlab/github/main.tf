@@ -69,7 +69,7 @@ resource "github_repository_ruleset" "main" {
     required_status_checks {
       strict_required_status_checks_policy = true
       required_check {
-        context        = "test"
+        context        = "test / test"
         integration_id = 15368
       }
     }

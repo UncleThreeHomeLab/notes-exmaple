@@ -1,0 +1,13 @@
+name: CI
+"on":
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  test:
+    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@118e5ce04f195d77eec297c6eedc68de20649f1f
+    with:
+      application: notes

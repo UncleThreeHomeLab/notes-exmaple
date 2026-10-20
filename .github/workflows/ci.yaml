@@ -7,11 +7,21 @@ name: CI
     branches: [main]
   workflow_dispatch:
 permissions: {contents: read, pull-requests: read}
+concurrency:
+  group: ci-${{ github.repository }}
+  cancel-in-progress: false
 jobs:
   test:
     if: >-
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@ee5085e793a42803305d6f5a4f5a34873453363a
+    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@c4d89c3ca6f9dd0343ce6b1f4e95acca79b768c6
+    with:
+      application: notes
+  publish:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions: {contents: read, pull-requests: read, id-token: write}
+    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-publish.yaml@c4d89c3ca6f9dd0343ce6b1f4e95acca79b768c6
     with:
       application: notes

@@ -15,13 +15,13 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@151ca89506288b102e445aed806ea6e332de69cd
+    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@9004fa97794b4ddc48f8b096fc5e4a52e54bd7da
     with:
       application: notes
   publish:
     needs: test
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions: {contents: read, pull-requests: read, id-token: write}
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-publish.yaml@151ca89506288b102e445aed806ea6e332de69cd
+    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-publish.yaml@9004fa97794b4ddc48f8b096fc5e4a52e54bd7da
     with:
       application: notes

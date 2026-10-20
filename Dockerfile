@@ -15,4 +15,5 @@ CMD ["python", "web.py"]
 
 FROM runtime AS test
 COPY tests tests
+COPY ci ci
 RUN --network=none python -m unittest discover -s tests -v

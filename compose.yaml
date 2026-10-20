@@ -1,0 +1,31 @@
+services:
+  test:
+    build: {context: ., target: test}
+    command: [python, -m, unittest, discover, -s, tests, -v]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 2
+    mem_limit: 1g
+  governance:
+    profiles: [governance]
+    image: ghcr.io/opentofu/opentofu:1.13.1@sha256:1df996fca13806a20d5a3d3ad54acdcf76bcb1aa4ac30b5ba169b9e4cecdbcc8
+    working_dir: /governance
+    volumes:
+      - ./.cloudlab/github:/governance:ro
+      - governance:/state
+    environment:
+      TF_DATA_DIR: /state/data
+      TF_IN_AUTOMATION: 'true'
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      TF_VAR_state_passphrase: ${TF_VAR_state_passphrase:-}
+      TF_HTTP_ADDRESS: ${TF_HTTP_ADDRESS:-}
+      TF_HTTP_LOCK_ADDRESS: ${TF_HTTP_ADDRESS:-}/lock
+      TF_HTTP_UNLOCK_ADDRESS: ${TF_HTTP_ADDRESS:-}/lock
+      TF_HTTP_LOCK_METHOD: POST
+      TF_HTTP_UNLOCK_METHOD: DELETE
+      TF_HTTP_USERNAME: ${TF_HTTP_USERNAME:-}
+      TF_HTTP_PASSWORD: ${TF_HTTP_PASSWORD:-}
+volumes:
+  governance:

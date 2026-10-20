@@ -12,16 +12,32 @@ concurrency:
   cancel-in-progress: false
 jobs:
   test:
+    name: test / test
     if: >-
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@0a3925b292b3b10f27c4612837271de9cc3e393b
-    with:
-      application: notes
+    runs-on: cloudlab-notes
+    timeout-minutes: 20
+    steps:
+      - name: Check out Notes
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Test Notes with rootless BuildKit
+        run: >-
+          buildctl --addr tcp://127.0.0.1:1234 build
+          --frontend dockerfile.v0 --local context=. --local dockerfile=.
+          --opt target=test --opt platform=linux/amd64
   publish:
     needs: test
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     permissions: {contents: read, pull-requests: read, id-token: write}
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-publish.yaml@0a3925b292b3b10f27c4612837271de9cc3e393b
-    with:
-      application: notes
+    runs-on: cloudlab-notes-publish
+    timeout-minutes: 25
+    steps:
+      - name: Check out Notes
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Build scan sign and propose Notes release
+        run: python3 -I -S ci/publisher.py

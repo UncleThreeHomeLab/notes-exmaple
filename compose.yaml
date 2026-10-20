@@ -4,6 +4,7 @@ services:
     command: [python, -m, unittest, discover, -s, tests, -v]
     network_mode: none
     read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     cpus: 2

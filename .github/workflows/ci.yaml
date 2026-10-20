@@ -1,27 +1,14 @@
-name: CI
+﻿name: CI eligibility probe
 "on":
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
-  workflow_dispatch:
+    types: [opened, ready_for_review, synchronize]
 permissions: {contents: read, pull-requests: read}
-concurrency:
-  group: ci-${{ github.repository }}
-  cancel-in-progress: false
 jobs:
   test:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-test.yaml@0a3925b292b3b10f27c4612837271de9cc3e393b
-    with:
-      application: notes
-  publish:
-    needs: test
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    permissions: {contents: read, pull-requests: read, id-token: write}
-    uses: UncleThreeHomeLab/yasai-cloudlab/.github/workflows/application-publish.yaml@0a3925b292b3b10f27c4612837271de9cc3e393b
-    with:
-      application: notes
+    if: github.event.pull_request.draft == false
+    runs-on: cloudlab-notes
+    timeout-minutes: 2
+    steps:
+      - name: Unapproved sentinel must never start
+        run: echo CLOUDLAB_UNAPPROVED_CODE_EXECUTED

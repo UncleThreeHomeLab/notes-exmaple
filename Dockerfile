@@ -1,7 +1,7 @@
 FROM python:3.13-slim-bookworm@sha256:5024f48ba9441d4b13a95d3945abc6365538e3a31109833367a1923523c6efed AS dependencies
 WORKDIR /app
-COPY requirements.txt .
-RUN python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: --target /dependencies -r requirements.txt
+COPY requirements.txt telemetry-requirements.txt .
+RUN python -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: --target /dependencies -r requirements.txt -r telemetry-requirements.txt
 
 FROM python:3.13-slim-bookworm@sha256:5024f48ba9441d4b13a95d3945abc6365538e3a31109833367a1923523c6efed AS runtime
 ENV PYTHONPATH=/dependencies:/app/lib.zip PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 OTEL_ENABLED=0

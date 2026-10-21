@@ -24,10 +24,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Test Notes with rootless BuildKit
-        run: >-
-          buildctl --addr tcp://127.0.0.1:1234 build
-          --frontend dockerfile.v0 --local context=. --local dockerfile=.
-          --opt target=test --opt platform=linux/amd64
+        shell: bash
+        run: |
+          /home/runner/externals/node24/bin/node --test tests/ci.test.cjs
+          buildctl --addr tcp://127.0.0.1:1234 build \
+            --frontend dockerfile.v0 --local context=. --local dockerfile=. \
+            --opt target=test --opt platform=linux/amd64
   publish:
     needs: test
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -39,5 +41,217 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
-      - name: Build scan sign and propose Notes release
-        run: python3 -I -S ci/publisher.py
+      - name: Validate publication scope
+        id: scope
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const fs = require('fs');
+            const c = JSON.parse(fs.readFileSync('/run/cloudlab-publisher/config/config.json', 'utf8'));
+            const e = process.env;
+            const fields = ['application', 'source_repository', 'source_repository_id', 'visibility',
+              'registry', 'project', 'release_repository', 'release_repository_id', 'workflow_identity'];
+            if (Object.keys(c).sort().join() !== fields.sort().join() ||
+                c.application !== 'notes' || c.visibility !== 'public' || c.project !== 'cloudlab-public' ||
+                !/^[a-z0-9][a-z0-9.-]{0,252}$/.test(c.registry) ||
+                !/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(c.release_repository) ||
+                c.release_repository.split('/')[0] !== e.GITHUB_REPOSITORY_OWNER ||
+                !Number.isSafeInteger(c.release_repository_id) || c.release_repository_id <= 0 ||
+                c.source_repository !== e.GITHUB_REPOSITORY || c.source_repository_id !== e.GITHUB_REPOSITORY_ID ||
+                c.workflow_identity !== `https://github.com/${e.GITHUB_REPOSITORY}/.github/workflows/ci.yaml@refs/heads/main` ||
+                e.RUNNER_ENVIRONMENT !== 'self-hosted' || e.GITHUB_REF !== 'refs/heads/main' ||
+                !['push', 'workflow_dispatch'].includes(e.GITHUB_EVENT_NAME) ||
+                !/^[a-f0-9]{40}$/.test(e.GITHUB_SHA) ||
+                !['GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'].every(k => /^[1-9][0-9]{0,19}$/.test(e[k]))) {
+              throw new Error('Publication scope differs from its approved local main workflow');
+            }
+            core.setSecret(c.registry);
+            for (const k of ['registry', 'project', 'application', 'workflow_identity']) core.setOutput(k, c[k]);
+      - name: Build application archive
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.scope.outputs.registry }}
+          PROJECT: ${{ steps.scope.outputs.project }}
+        run: |
+          set -euo pipefail
+          umask 077
+          state="$RUNNER_TEMP/publication"
+          mkdir -p "$state/pull"
+          trap 'echo "::error::Application build failed; private output withheld"' ERR
+          test "$(cat /run/cloudlab-publisher/pull/username)" = "robot\$$PROJECT+pull"
+          test "$(cat /run/cloudlab-publisher/pull/secret_version)" = 1
+          jq -n --arg registry "$REGISTRY" --rawfile user /run/cloudlab-publisher/pull/username \
+            --rawfile password /run/cloudlab-publisher/pull/password \
+            '{auths:{($registry):{auth:((($user|rtrimstr("\n"))+":"+($password|rtrimstr("\n")))|@base64)}}}' \
+            > "$state/pull/config.json"
+          env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$state/pull" \
+            timeout 1200 buildctl --addr tcp://127.0.0.1:1234 build --frontend dockerfile.v0 \
+              --local context=. --local dockerfile=. --opt target=runtime --opt platform=linux/amd64 \
+              --output "type=docker,name=application,dest=$state/image.tar" > "$state/build.log" 2>&1
+          test -s "$state/image.tar"
+          test "$(stat -c %s "$state/image.tar")" -le 4294967296
+          crane digest --tarball "$state/image.tar" > "$state/digest" 2> "$state/digest.log"
+          grep -Eq '^sha256:[a-f0-9]{64}$' "$state/digest"
+      - name: Scan immutable archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="$RUNNER_TEMP/publication"
+          trap 'echo "::error::Application scan failed; private output withheld"' ERR
+          database=$(jq -er '.database | select(test("^ghcr.io/aquasecurity/trivy-db@sha256:[a-f0-9]{64}$"))' ci/scan.lock.json)
+          env -i PATH="$PATH" HOME="$HOME" timeout 1000 trivy image --quiet --no-progress \
+            --config /dev/null --ignorefile /dev/null --ignore-unfixed=false --input "$state/image.tar" \
+            --timeout 15m --parallel 2 --cache-dir "$state/trivy" --db-repository "$database" \
+            --offline-scan --skip-java-db-update --scanners vuln,secret --severity HIGH,CRITICAL \
+            --exit-code 1 --format json --output "$state/scan.json" > "$state/scan.log" 2>&1
+          jq -e '.SchemaVersion == 2 and .ArtifactType == "container_image" and (.Results|length > 0) and
+            all(.Results[]; ((.Vulnerabilities // [])|length == 0) and ((.Secrets // [])|length == 0))' \
+            "$state/scan.json" > /dev/null
+          test "$(crane digest --tarball "$state/image.tar" 2> "$state/digest.log")" = "$(cat "$state/digest")"
+      - name: Push scanned digest
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.scope.outputs.registry }}
+          PROJECT: ${{ steps.scope.outputs.project }}
+          APPLICATION: ${{ steps.scope.outputs.application }}
+        run: |
+          set -euo pipefail
+          umask 077
+          state="$RUNNER_TEMP/publication"
+          mkdir -p "$state/push"
+          trap 'echo "::error::Digest push failed; existing artifacts preserved; private output withheld"' ERR
+          test "$(cat /run/cloudlab-publisher/push/username)" = "robot\$$PROJECT+push"
+          test "$(cat /run/cloudlab-publisher/push/secret_version)" = 1
+          jq -n --arg registry "$REGISTRY" --rawfile user /run/cloudlab-publisher/push/username \
+            --rawfile password /run/cloudlab-publisher/push/password \
+            '{auths:{($registry):{auth:((($user|rtrimstr("\n"))+":"+($password|rtrimstr("\n")))|@base64)}}}' \
+            > "$state/push/config.json"
+          tag="$REGISTRY/$PROJECT/$APPLICATION:release-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$state/push" timeout 60 crane digest "$tag" \
+              > "$state/existing" 2> "$state/registry.log"; then
+            test "$(cat "$state/existing")" = "$(cat "$state/digest")"
+          else
+            if grep -Eq 'UNAUTHORIZED|DENIED|status code (401|403)' "$state/registry.log"; then exit 1; fi
+            if ! grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN' "$state/registry.log"; then
+              grep -Fq "https://$REGISTRY/v2/$PROJECT/$APPLICATION/manifests/${tag##*:}: NOT_FOUND" "$state/registry.log"
+            fi
+            env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$state/push" \
+              timeout 300 crane push "$state/image.tar" "$tag" > "$state/push.log" 2>&1
+          fi
+          reference="$REGISTRY/$PROJECT/$APPLICATION@$(cat "$state/digest")"
+          test "$(env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$state/pull" timeout 60 crane digest "$reference" \
+            2> "$state/pull.log")" = "$(cat "$state/digest")"
+      - name: Sign and verify exact workflow identity
+        shell: bash
+        env:
+          REGISTRY: ${{ steps.scope.outputs.registry }}
+          PROJECT: ${{ steps.scope.outputs.project }}
+          APPLICATION: ${{ steps.scope.outputs.application }}
+          WORKFLOW_IDENTITY: ${{ steps.scope.outputs.workflow_identity }}
+        run: |
+          set -euo pipefail
+          state="$RUNNER_TEMP/publication"
+          trap 'echo "::error::Exact image signature verification failed; private output withheld"' ERR
+          reference="$REGISTRY/$PROJECT/$APPLICATION@$(cat "$state/digest")"
+          # Retain the compatibility format supported by the pinned admission verifier.
+          env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$state/push" \
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN="$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            ACTIONS_ID_TOKEN_REQUEST_URL="$ACTIONS_ID_TOKEN_REQUEST_URL" timeout 300 \
+            cosign sign --yes --new-bundle-format=false --use-signing-config=false \
+              --sign-container-identity="https://github.com/$GITHUB_REPOSITORY" "$reference" > "$state/sign.log" 2>&1
+          env -i PATH="$PATH" HOME="$HOME" DOCKER_CONFIG="$state/pull" timeout 300 cosign verify \
+            --certificate-identity "$WORKFLOW_IDENTITY" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" --certificate-github-workflow-ref refs/heads/main \
+            --certificate-github-workflow-sha "$GITHUB_SHA" "$reference" > "$state/verify.log" 2>&1
+      - name: Propose single-file GitOps release
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const c = JSON.parse(fs.readFileSync('/run/cloudlab-publisher/config/config.json', 'utf8'));
+            const digest = fs.readFileSync(`${process.env.RUNNER_TEMP}/publication/digest`, 'utf8').trim();
+            if (!/^sha256:[a-f0-9]{64}$/.test(digest)) throw new Error('Release requires its scanned digest');
+            const read = p => fs.readFileSync(`/run/cloudlab-publisher/github/${p}`, 'utf8').trim();
+            const app = read('app_id'), installation = read('installation_id');
+            if (![app, installation].every(v => /^[1-9][0-9]{0,19}$/.test(v))) throw new Error('Invalid release App identity');
+            const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+            const now = Math.floor(Date.now() / 1000);
+            const message = `${encode({alg:'RS256',typ:'JWT'})}.${encode({iat:now-60,exp:now+540,iss:app})}`;
+            const jwt = `${message}.${crypto.sign('RSA-SHA256', Buffer.from(message), read('private_key')).toString('base64url')}`;
+            core.setSecret(jwt);
+            let token, client, phase = 'token exchange';
+            try {
+              const response = await github.request('POST /app/installations/{installation_id}/access_tokens', {
+                installation_id: installation, repository_ids: [c.release_repository_id],
+                permissions: {contents:'write',pull_requests:'write'}, headers:{authorization:`Bearer ${jwt}`},
+                request:{timeout:30000,redirect:'error'}});
+              token = response.data.token;
+              if (typeof token !== 'string' || !token || /\s/.test(token)) throw new Error('Invalid scoped token');
+              core.setSecret(token);
+              client = new github.constructor({auth:token,request:{timeout:30000,redirect:'error'},log:{debug(){},info(){},warn(){},error(){}}});
+              const [owner, repo] = c.release_repository.split('/');
+              const args = {owner, repo};
+              phase = 'repository validation';
+              const target = (await client.rest.repos.get(args)).data;
+              if (target.id !== c.release_repository_id || target.full_name !== c.release_repository ||
+                  target.private || target.fork || target.archived || target.disabled || target.default_branch !== 'main') {
+                throw new Error('Repository scope differs');
+              }
+              const path = `apps/releases/${c.application}.json`;
+              const content = JSON.stringify({digest,source_revision:process.env.GITHUB_SHA,workflow_run_id:process.env.GITHUB_RUN_ID}, null, 2)+'\n';
+              const base = (await client.rest.git.getRef({...args,ref:'heads/main'})).data.object.sha;
+              const baseCommit = (await client.rest.git.getCommit({...args,commit_sha:base})).data;
+              let tree = baseCommit.tree.sha;
+              for (const component of ['apps','releases']) {
+                const entry = (await client.rest.git.getTree({...args,tree_sha:tree})).data.tree.find(r => r.path === component);
+                if (!entry || entry.mode !== '040000') throw new Error('Release parent is not a directory');
+                tree = entry.sha;
+              }
+              const entry = (await client.rest.git.getTree({...args,tree_sha:tree})).data.tree.find(r => r.path === `${c.application}.json`);
+              if (entry && entry.mode !== '100644') throw new Error('Release cannot replace a link or special file');
+              if (entry) {
+                const existing = (await client.rest.git.getBlob({...args,file_sha:entry.sha})).data;
+                if (Buffer.from(existing.content,'base64').toString() === content) return;
+              }
+              const branch = 'release/'+crypto.createHash('sha256').update(base+path+content).digest('hex').slice(0,24);
+              phase = 'release branch';
+              let head;
+              try { head = (await client.rest.git.getRef({...args,ref:`heads/${branch}`})).data.object.sha; }
+              catch (error) { if (error.status !== 404) throw error; }
+              if (head) {
+                const comparison = (await client.rest.repos.compareCommits({...args,base,head})).data;
+                const existing = (await client.rest.repos.getContent({...args,path,ref:head})).data;
+                if (comparison.total_commits !== 1 || comparison.commits[0].parents.length !== 1 ||
+                    comparison.commits[0].parents[0].sha !== base || comparison.files.length !== 1 ||
+                    comparison.files[0].filename !== path || existing.type !== 'file' ||
+                    Buffer.from(existing.content,'base64').toString() !== content) throw new Error('Existing branch differs; overwrite refused');
+              } else {
+                const next = (await client.rest.git.createTree({...args,base_tree:baseCommit.tree.sha,
+                  tree:[{path,mode:'100644',type:'blob',content}]})).data.sha;
+                head = (await client.rest.git.createCommit({...args,message:`Propose image ${digest}`,tree:next,parents:[base]})).data.sha;
+                await client.rest.git.createRef({...args,ref:`refs/heads/${branch}`,sha:head});
+              }
+              phase = 'release proposal';
+              if ((await client.rest.git.getRef({...args,ref:'heads/main'})).data.object.sha !== base) throw new Error('Main advanced; existing branch retained');
+              const pulls = (await client.rest.pulls.list({...args,head:`${owner}:${branch}`,base:'main',state:'all',per_page:100})).data;
+              if (pulls.length > 1 || pulls.length && (pulls[0].state !== 'open' || pulls[0].head.sha !== head)) throw new Error('Existing PR differs; no PR changed');
+              if (!pulls.length) await client.rest.pulls.create({...args,base:'main',head:branch,
+                title:`Propose image ${digest.slice(0,19)}`,
+                body:`Propose the signed image by digest. Only ${path} changes. Argo owns deployment; this workflow never merges.`});
+              core.info('Single-file release PR proposed; deployment remains owned by Argo');
+            } catch (error) {
+              throw new Error(`Release ${phase} failed (${Number.isInteger(error.status) ? 'HTTP '+error.status : 'transport or response validation'}); existing artifacts and branches retained`);
+            } finally {
+              if (token) {
+                try { await github.request('DELETE /installation/token', {headers:{authorization:`Bearer ${token}`},request:{timeout:30000,redirect:'error'}}); }
+                catch { core.setFailed('Release token revocation failed; token remains bounded by its expiry'); }
+              }
+            }
+      - name: Remove ephemeral publication files
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RUNNER_TEMP" && test "$RUNNER_TEMP" != /
+          rm -rf -- "$RUNNER_TEMP/publication"

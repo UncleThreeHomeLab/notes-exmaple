@@ -57,7 +57,18 @@ function fixture(options={}) {
     pulls:{list:operation('pulls', () => options.existing ? [{state:options.closed ? 'closed' : 'open',head:{sha:'head'}}] : []),
       create:operation('create-pr', () => ({}))}
   };
-  const github = {request,constructor:class {constructor(){this.rest=rest;}}};
+  const github = {request:()=>{throw new Error('Default source token must never authenticate the release API');},
+    constructor:class {constructor(settings){
+      this.rest=rest;
+      this.request=(route,args)=>{
+        if(route.startsWith('POST')) {
+          const [header,payload,signature]=settings.auth.split('.');
+          assert.equal(JSON.parse(Buffer.from(payload,'base64url')).iss,'123');
+          assert.ok(crypto.verify('RSA-SHA256',Buffer.from(header+'.'+payload),crypto.createPublicKey(key),Buffer.from(signature,'base64url')));
+        } else assert.equal(settings.auth,'synthetic-installation-token');
+        return request(route,args);
+      };
+    }}};
   const core = {setSecret:v => masks.push(v),setOutput(){},info(){},setFailed:v => failures.push(v)};
   const mockRequire = name => name === 'fs' ? {readFileSync:path => path.endsWith('config.json') ? JSON.stringify(config) :
     path.endsWith('/digest') ? (options.badDigest ? 'latest' : 'sha256:'+'a'.repeat(64)) :

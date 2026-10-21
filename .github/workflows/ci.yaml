@@ -180,12 +180,12 @@ jobs:
             const message = `${encode({alg:'RS256',typ:'JWT'})}.${encode({iat:now-60,exp:now+540,iss:app})}`;
             const jwt = `${message}.${crypto.sign('RSA-SHA256', Buffer.from(message), read('private_key')).toString('base64url')}`;
             core.setSecret(jwt);
+            const issuer = new github.constructor({auth:jwt,request:{timeout:30000,redirect:'error'},log:{debug(){},info(){},warn(){},error(){}}});
             let token, client, phase = 'token exchange';
             try {
-              const response = await github.request('POST /app/installations/{installation_id}/access_tokens', {
+              const response = await issuer.request('POST /app/installations/{installation_id}/access_tokens', {
                 installation_id: installation, repository_ids: [c.release_repository_id],
-                permissions: {contents:'write',pull_requests:'write'}, headers:{authorization:`Bearer ${jwt}`},
-                request:{timeout:30000,redirect:'error'}});
+                permissions: {contents:'write',pull_requests:'write'}});
               token = response.data.token;
               if (typeof token !== 'string' || !token || /\s/.test(token)) throw new Error('Invalid scoped token');
               core.setSecret(token);
@@ -244,7 +244,7 @@ jobs:
               throw new Error(`Release ${phase} failed (${Number.isInteger(error.status) ? 'HTTP '+error.status : 'transport or response validation'}); existing artifacts and branches retained`);
             } finally {
               if (token) {
-                try { await github.request('DELETE /installation/token', {headers:{authorization:`Bearer ${token}`},request:{timeout:30000,redirect:'error'}}); }
+                try { await client.request('DELETE /installation/token'); }
                 catch { core.setFailed('Release token revocation failed; token remains bounded by its expiry'); }
               }
             }

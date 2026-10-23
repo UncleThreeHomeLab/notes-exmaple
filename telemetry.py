@@ -4,24 +4,28 @@ import json
 import os
 import re
 import time
+import threading
 
 TRACER = None
 REQUESTS = None
 DURATION = None
 PROPAGATOR = None
 REVISION = None
+MAXIMUM = None
+MAXIMA = {}
+MAX_LOCK = threading.Lock()
 ROUTES = {'/', '/health', '/ready', '/live', '/api/notes', '/api/release/notes', '/api/operations'}
 
 
 def start(service):
-    global TRACER, REQUESTS, DURATION, PROPAGATOR, REVISION
+    global TRACER, REQUESTS, DURATION, PROPAGATOR, REVISION, MAXIMUM
     if os.environ.get('OTEL_ENABLED') != '1': return
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-    from prometheus_client import Counter, Histogram, start_http_server
+    from prometheus_client import Counter, Gauge, Histogram, start_http_server
     if service not in ('notes-web', 'notes-api'):
         raise ValueError('Unexpected telemetry service')
     endpoint = os.environ['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT']
@@ -39,6 +43,8 @@ def start(service):
     REQUESTS = Counter('cloudlab_http_requests', 'Completed bounded application requests', labels)
     DURATION = Histogram('cloudlab_http_duration_seconds', 'Application response duration', labels,
                          buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10))
+    MAXIMUM = Gauge('cloudlab_http_duration_seconds_max', 'Maximum response duration since revision start',
+                    ('service', 'route', 'traffic', 'revision'))
     start_http_server(9091)
 
 
@@ -62,6 +68,8 @@ def request(handler, service):
     route = handler.path.split('?', 1)[0]
     route = route if route in ROUTES else 'other'
     traffic = 'release' if route == '/api/release/notes' else ('synthetic' if route in ('/health', '/ready', '/live') else 'user')
+    if route == '/' and handler.headers.get('User-Agent') == 'CloudLab-Release-Proof/1.0':
+        traffic = 'release'
     handler.telemetry_status = 500
     started = time.monotonic()
     context = None
@@ -83,7 +91,12 @@ def request(handler, service):
                 labels = (service, route, handler.command, str(status), traffic, REVISION)
                 exemplar = {'trace_id': format(current.get_span_context().trace_id, '032x')}
                 REQUESTS.labels(*labels).inc(exemplar=exemplar)
+                REQUESTS.labels(service, route, handler.command, '500', traffic, REVISION).inc(0)
                 DURATION.labels(*labels).observe(elapsed, exemplar=exemplar)
+                with MAX_LOCK:
+                    key = (service, route, traffic, REVISION)
+                    MAXIMA[key] = max(MAXIMA.get(key, 0), elapsed)
+                    MAXIMUM.labels(*key).set(MAXIMA[key])
                 print(json.dumps({'kind': 'request', 'service': service, 'route': route, 'status': status,
                                   'duration_ms': round(elapsed * 1000, 3), **exemplar}, separators=(',', ':')), flush=True)
 
@@ -98,5 +111,9 @@ def instrument(handler, service):
     original_response = handler.send_response
     def response(self, status, *args, **kwargs):
         self.telemetry_status = status
-        return original_response(self, status, *args, **kwargs)
+        result = original_response(self, status, *args, **kwargs)
+        revision = os.environ.get('CLOUDLAB_REVISION', '')
+        if re.fullmatch('[a-z0-9]{1,64}', revision):
+            self.send_header('X-CloudLab-Revision', revision)
+        return result
     handler.send_response = response

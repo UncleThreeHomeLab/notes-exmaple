@@ -131,7 +131,7 @@ export function handleSummary(){return {stdout:''};}"""
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'migrate', 'measure', 'restored', 'inspect'))
+    parser.add_argument('action', choices=('converge', 'prepare', 'migrate', 'measure', 'restored', 'inspect'))
     parser.add_argument('--case', choices=('healthy', 'faulty', 'missing', 'low-samples', 'query-failure'))
     parser.add_argument('--digest')
     args = parser.parse_args()
@@ -144,7 +144,23 @@ def main():
     if json.loads((ROOT / 'charts/service/release-policy.json').read_text()) != json.loads((HERE.parent / 'release-policy.json').read_text()):
         raise RuntimeError('Notes release policy differs from accepted platform thresholds')
     environment()
-    if args.action == 'prepare':
+    if args.action == 'converge':
+        from playbooks.argocd.files.render import committed_payload
+        source = committed_payload()
+        applies = []
+        for _ in range(2):
+            stats = {}
+            for component in ('argocd/010-bootstrap', 'services/010-bootstrap'):
+                subprocess.run(['ansible-playbook', '-i', 'inventory.yml', 'playbooks/' + component + '.yml'],
+                               cwd=ROOT / 'ansible', check=True, timeout=600)
+                stats[component] = json.loads(Path('/tmp/lab-stats.json').read_text())
+            applies.append(stats)
+        if any(row['changed'] or row.get('failures') or row.get('unreachable')
+               for stats in applies[1].values() for row in stats.values()):
+            raise RuntimeError('Notes scoped repeat apply did not converge with zero changes')
+        result = {'platform_revision': source['revision'], 'scoped_applies': applies}
+        save(Path('/recovery/notes-rollouts-setup.json'), result)
+    elif args.action == 'prepare':
         if CHECKPOINT.exists():
             raise RuntimeError('Existing Notes proof checkpoint retained; inspect before starting another')
         value = remote('prepare')

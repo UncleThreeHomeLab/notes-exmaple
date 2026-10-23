@@ -13,7 +13,7 @@ The frontend supports measured HTTPRoute canaries through the platform service
 chart; the API retains its Deployment. Signed image changes still require the
 separate GitOps release PR. `compose.release.yaml` uses an adjacent Cloudlab checkout
 (`CLOUDLAB_DIR`), its ignored `.env` and existing Compose state volumes. Its
-`release-proof` service accepts `prepare`, `inspect`, `migrate --digest sha256:…`,
+`release-proof` service accepts `converge`, `prepare`, `inspect`, `migrate --digest sha256:…`,
 `measure --case healthy|faulty|missing|low-samples|query-failure --digest sha256:…`
 and `restored --digest sha256:…`. Start measurement before merging each release PR.
 Traffic reads the actual Notes homepage through verified TLS at 6 RPS, four VUs,
@@ -23,5 +23,7 @@ Rollouts-owned AnalysisRun. Restore the signed known-good Git release after abor
 The checkpoint and results stay in the private recovery volume. `migrate` retires
 only the old stateless frontend after its healthy Rollout owns stable traffic;
 it preserves the API, application credentials and data.
+`converge` applies only the GitOps and service owners twice, requiring zero changes
+on the second apply. It requires a clean published platform checkout.
 
 Repository governance uses OpenTofu 1.13.1 and GitHub provider 6.13.0 in `.cloudlab/github`. Supply local `GITHUB_TOKEN`, `TF_VAR_state_passphrase`, `TF_HTTP_ADDRESS`, `TF_HTTP_USERNAME` and `TF_HTTP_PASSWORD`; use the designated encrypted HTTP backend. Run `docker compose run --rm governance init -lockfile=readonly`, then `docker compose run --rm governance plan` and `docker compose run --rm governance apply`. Governance credentials never enter Actions or Kubernetes.

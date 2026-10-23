@@ -1,0 +1,22 @@
+services:
+  release-proof:
+    extends:
+      file: ${CLOUDLAB_DIR:-../yasai-cloudlab}/compose.yaml
+      service: lab
+    entrypoint: [python, /notes/tests/release.py]
+    volumes: ['.:/notes:ro']
+    command: [inspect]
+networks:
+  default:
+    external: true
+    name: ${CLOUDLAB_COMPOSE_PROJECT:-yasai-cloudlab}_default
+volumes:
+  ssh_known_hosts:
+    external: true
+    name: ${CLOUDLAB_COMPOSE_PROJECT:-yasai-cloudlab}_ssh_known_hosts
+  recovery_outputs:
+    external: true
+    name: ${CLOUDLAB_COMPOSE_PROJECT:-yasai-cloudlab}_recovery_outputs
+  infra_work:
+    external: true
+    name: ${CLOUDLAB_COMPOSE_PROJECT:-yasai-cloudlab}_infra_work

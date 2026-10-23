@@ -3,11 +3,33 @@ import copy
 import json
 from unittest import TestCase
 from unittest.mock import patch
+from unittest.mock import Mock
+from pathlib import Path
+import contextlib
+import tempfile
 
 import release_cluster as cluster
+import release as driver
 
 
 class ClusterOperationTests(TestCase):
+    def test_hung_traffic_process_is_terminated_at_the_hard_deadline(self):
+        process = Mock()
+        process.poll.return_value = None
+        before = {'retained': {}, 'state': {'stable': 'stable'}, 'gateway': 'unused', 'host': 'unused'}
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / 'checkpoint.json'
+            checkpoint.write_text('{"retained":{}}')
+            with patch.object(driver, 'CHECKPOINT', checkpoint), patch.object(driver, 'remote', return_value=before), \
+                    patch.object(driver, 'wait_for', return_value={'current': 'canary'}), \
+                    patch.object(driver, 'tunnel', return_value=contextlib.nullcontext()), \
+                    patch.object(driver, 'traffic', return_value=process), \
+                    patch.object(driver.time, 'monotonic', side_effect=[0, 0, 216]):
+                with self.assertRaisesRegex(RuntimeError, 'hard deadline'):
+                    driver.measure('healthy', 'digest')
+        process.terminate.assert_called_once()
+        process.communicate.assert_called_once_with(timeout=15)
+
     def test_reused_image_hash_cannot_select_an_older_release_analysis(self):
         key = 'rollout.argoproj.io/revision'
         rollout = {'metadata': {'uid': 'rollout', 'annotations': {key: '7'}},

@@ -74,6 +74,8 @@ def measure(case, digest):
             while process.poll() is None:
                 state = remote('snapshot')
                 elapsed = time.monotonic() - weighted
+                if elapsed > 215:
+                    raise RuntimeError('Notes traffic exceeded its hard deadline')
                 if decision is None and (state['abort'] or state['phase'] == 'Healthy' and state['stable'] == state['current']):
                     decision = round(elapsed, 3)
                 if case in ('missing', 'low-samples', 'query-failure') and not injected and state['analysis']:

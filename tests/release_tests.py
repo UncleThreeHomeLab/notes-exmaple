@@ -3,11 +3,54 @@ import copy
 import json
 from unittest import TestCase
 from unittest.mock import patch
+from unittest.mock import Mock
+from pathlib import Path
+import contextlib
+import tempfile
 
 import release_cluster as cluster
+import release as driver
 
 
 class ClusterOperationTests(TestCase):
+    def test_hung_traffic_process_is_terminated_at_the_hard_deadline(self):
+        process = Mock()
+        process.poll.return_value = None
+        before = {'retained': {}, 'state': {'stable': 'stable'}, 'gateway': 'unused', 'host': 'unused'}
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / 'checkpoint.json'
+            checkpoint.write_text('{"retained":{}}')
+            with patch.object(driver, 'CHECKPOINT', checkpoint), patch.object(driver, 'remote', return_value=before), \
+                    patch.object(driver, 'wait_for', return_value={'current': 'canary'}), \
+                    patch.object(driver, 'tunnel', return_value=contextlib.nullcontext()), \
+                    patch.object(driver, 'traffic', return_value=process), \
+                    patch.object(driver.time, 'monotonic', side_effect=[0, 0, 216]):
+                with self.assertRaisesRegex(RuntimeError, 'hard deadline'):
+                    driver.measure('healthy', 'digest')
+        process.terminate.assert_called_once()
+        process.communicate.assert_called_once_with(timeout=15)
+
+    def test_reused_image_hash_cannot_select_an_older_release_analysis(self):
+        key = 'rollout.argoproj.io/revision'
+        rollout = {'metadata': {'uid': 'rollout', 'annotations': {key: '7'}},
+                   'status': {'currentPodHash': 'reused-hash'}}
+        run = {'metadata': {'name': 'old-run', 'annotations': {key: '3'}, 'creationTimestamp': 'earlier',
+                           'ownerReferences': [{'uid': 'rollout', 'controller': True}]},
+               'spec': {'args': [{'name': 'revision', 'value': 'reused-hash'}]}}
+        def get(kind, *_args, **_kwargs):
+            if kind.startswith('rollout'): return rollout
+            if kind.startswith('analysisruns'): return {'items': [run]}
+            if kind.startswith('analysisrun'): return run
+            if kind == 'httproute': return {}
+            raise AssertionError(kind)
+        with patch.object(cluster, 'approved', return_value={'metadata': {'annotations': {}}}), \
+                patch.object(cluster, 'get', side_effect=get):
+            self.assertIsNone(cluster.snapshot()['analysis'])
+            rollout['status']['canary'] = {'currentStepAnalysisRunStatus': {'name': 'old-run'}}
+            self.assertIsNone(cluster.snapshot()['analysis'])
+            run['metadata']['annotations'][key] = '7'
+            self.assertEqual(cluster.snapshot()['analysis'], 'old-run')
+
     def test_initial_route_structure_is_applied_by_argo_without_changing_desired_weight_ownership(self):
         app = {'metadata': {'resourceVersion': '1'}, 'spec': {'source': {'targetRevision': 'a' * 40}}}
         state = {'weights': [1], 'stable': 'initial', 'current': 'initial', 'abort': False, 'digest': 'signed'}

@@ -29,17 +29,25 @@ def snapshot():
     app = approved()
     rollout = get('rollout.argoproj.io', NAME, NS) or {}
     status = rollout.get('status', {})
+    revision_key = 'rollout.argoproj.io/revision'
+    release_revision = rollout.get('metadata', {}).get('annotations', {}).get(revision_key)
     route = get('httproute', NAME, NS) or {}
     analysis = status.get('canary', {}).get('currentStepAnalysisRunStatus', {}).get('name')
     if not analysis and rollout:
         candidates = [run for run in (get('analysisruns.argoproj.io', namespace=NS) or {'items': []})['items']
                       if any(ref.get('uid') == rollout['metadata']['uid'] and ref.get('controller')
                              for ref in run['metadata'].get('ownerReferences', []))
+                      and run['metadata'].get('annotations', {}).get(revision_key) == release_revision
                       and any(arg.get('name') == 'revision' and arg.get('value') == status.get('currentPodHash')
                               for arg in run['spec'].get('args', []))]
         if candidates:
             analysis = max(candidates, key=lambda run: run['metadata']['creationTimestamp'])['metadata']['name']
     run = get('analysisrun.argoproj.io', analysis, NS) if analysis else None
+    if run and (run['metadata'].get('annotations', {}).get(revision_key) != release_revision or
+                not any(ref.get('uid') == rollout['metadata']['uid'] and ref.get('controller')
+                        for ref in run['metadata'].get('ownerReferences', []))):
+        run = None
+        analysis = None
     metrics = []
     for metric in (run or {}).get('status', {}).get('metricResults', []):
         metrics.append({key: metric.get(key) for key in ('name', 'phase', 'count', 'successful', 'failed', 'error')})

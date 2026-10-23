@@ -85,6 +85,22 @@ def run(request):
         old = get('deployment', NAME, NS)
         if not old:
             return {'superseded_deployment_absent': True}
+        if len(state['weights']) == 1:
+            rollout = get('rollout.argoproj.io', NAME, NS)
+            replica_set = get('replicaset', NAME + '-' + str(state['stable']), NS)
+            if (state['stable'] != state['current'] or state['abort'] or state['digest'] != request['digest'] or
+                    not rollout or not replica_set or replica_set.get('status', {}).get('availableReplicas', 0) < rollout['spec']['replicas'] or
+                    app.get('operation')):
+                raise RuntimeError('Notes route initialization requires its available initial signed revision')
+            # One scoped Argo sync initializes the new backend list before weight delegation.
+            operation = {'sync': {'revision': app['spec']['source']['targetRevision'], 'prune': False,
+                'syncOptions': ['RespectIgnoreDifferences=false', 'FailOnSharedResource=true', 'DisableClientSideApplyMigration=true'],
+                'resources': [{'group': 'gateway.networking.k8s.io', 'kind': 'HTTPRoute', 'name': name}
+                              for name in (NAME, NAME + '-extra-0')]}}
+            kube('patch', 'application.argoproj.io', APP, '-n', 'argocd', '--type=json', '-p', json.dumps([
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': app['metadata']['resourceVersion']},
+                {'op': 'add', 'path': '/operation', 'value': operation}]))
+            return {'route_initialization_requested': True}
         if (state['phase'] != 'Healthy' or not state['observed'] or state['stable'] != state['current'] or
                 state['weights'] != [100, 0] or state['abort'] or state['digest'] != request['digest'] or
                 not old['metadata'].get('annotations', {}).get('argocd.argoproj.io/tracking-id', '').startswith(APP + ':') or

@@ -170,6 +170,10 @@ def main():
         result = remote('snapshot')
     elif args.action == 'migrate':
         result = remote('migrate', digest=args.digest)
+        if result.get('route_initialization_requested'):
+            wait_for(lambda state: state['phase'] == 'Healthy' and state['weights'] == [100, 0] and
+                     state['stable'] == state['current'] and state['observed'], 'initial Notes routes and stable availability')
+            result = remote('migrate', digest=args.digest)
     elif args.action == 'measure':
         result = measure(args.case, args.digest)
     else:

@@ -39,7 +39,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/operations' and self.headers.get('Host') != os.environ.get('OPERATIONS_HOST'):
             self.send_error(404)
             return
-        if path == '/monitoring-proof/failed':
+        if path == '/monitoring-proof/failed' or (path == '/' and
+                self.headers.get('User-Agent') == 'CloudLab-Release-Proof/1.0'):
             body = b'{"ready":false}'
             self.send_response(503)
             self.send_header('Content-Type', 'application/json')
